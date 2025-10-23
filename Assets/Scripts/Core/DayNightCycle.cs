@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -7,11 +7,11 @@ public class DayNightCycle : MonoBehaviour
 {
     [Header("Directional Light (Sun)")]
     public Light directionalLight;
-    [Tooltip("Czas trwania pe�nego cyklu dnia w sekundach")]
+    [Tooltip("Czas trwania pełnego cyklu doby (s).")]
     public float dayDuration = 120f;
-    [Range(0f, 1f)] public float time01 = 0f; // 0 = �wit, 0.5 = zmierzch, 1 = noc
+    [Range(0f, 1f)] public float time01 = 0f; // 0..1 postęp doby (świt→dzień→zmierzch→noc)
 
-    [Header("Intensity / Colors")]
+    [Header("Intensity / Color")]
     public AnimationCurve lightIntensityCurve;
     public Gradient lightColorGradient;
 
@@ -20,45 +20,55 @@ public class DayNightCycle : MonoBehaviour
     public Gradient fogColorGradient;
     public AnimationCurve fogDensityCurve;
 
-    [Header("Skybox Blend (Cubemaps)")]
-    public Material blendedSkybox;           // przypisz materia� Skybox_BlendCubemap
-    public AnimationCurve exposureCurve;     // 0..1 -> Exposure
-    public AnimationCurve blendCurve;        // 0..1 -> Blend (0 dzie�, 1 noc)
-    public bool updateGI = true;
+    [Header("Skybox Blend (Cubemaps shader)")]
+    public Material blendedSkybox;        // materiał z Shaderem "Skybox/BlendCubemaps"
+    public AnimationCurve exposureCurve;  // 0..1 -> _Exposure
+    public AnimationCurve blendCurve;     // 0..1 -> _Blend (0 dzień, 1 noc)
+    public bool updateGI = true;          // DynamicGI.UpdateEnvironment()
 
     [Header("Skybox Rotation")]
     public bool rotateSkybox = true;
-    [Tooltip("Stopnie/sekunda - rotacja cubemapy dnia")]
+    [Tooltip("deg/sec — prędkość obrotu cubemapy dnia")]
     public float dayCubeYawSpeed = 1f;
-    [Tooltip("Stopnie/sekunda - rotacja cubemapy nocy")]
+    [Tooltip("deg/sec — prędkość obrotu cubemapy nocy")]
     public float nightCubeYawSpeed = 0.5f;
-    [Tooltip("Je�li true � noc obraca si� tak samo jak dzie� (z przesuni�ciem).")]
+    [Tooltip("Jeśli true — noc obraca się jak dzień z offsetem.")]
     public bool lockNightToDay = false;
-    [Tooltip("Przesuni�cie k�ta nocnej cubemapy wzgl�dem dnia (gdy lockNightToDay = true)")]
     public float nightOffsetDeg = 0f;
 
-    private float _cycleTimer = 0f;
-    private float _dayYaw = 0f;
-    private float _nightYaw = 0f;
+    [Header("Gameplay Hooks")]
+    public FlameEnergy flame;                     // przypnij obiekt z FlameEnergy
+    [Tooltip("Próg intensywności, poniżej którego uznajemy noc (fallback).")]
+    public float nightIntensityThreshold = 0.2f;
+    [Tooltip("Histereza progowa, by nie klikało przy świcie/zmierzchu.")]
+    public float nightHysteresis = 0.05f;         // np. 0.05 = 5% marginesu
 
-    //====================================================
+    // Internal state
+    private float _cycleTimer = 0f;
+    private float _dayYaw = 0f, _nightYaw = 0f;
+    private bool _isNightCached = false;          // do histerezy
+
+    // ================================================================
     void Reset()
     {
-        // Ustaw �wiat�o s�oneczne, je�li brak
-        if (directionalLight == null)
+        // światło słoneczne
+        if (!directionalLight)
         {
-            Light dirLight = RenderSettings.sun;
-            if (dirLight == null)
+            var sun = RenderSettings.sun;
+            if (!sun)
             {
-                GameObject lightObj = new GameObject("Directional Light");
-                dirLight = lightObj.AddComponent<Light>();
-                dirLight.type = LightType.Directional;
-                dirLight.color = Color.white;
+                var go = new GameObject("Directional Light");
+                sun = go.AddComponent<Light>();
+                sun.type = LightType.Directional;
+                sun.intensity = 1f;
+                sun.color = Color.white;
             }
-            directionalLight = dirLight;
+            directionalLight = sun;
         }
 
-        // Domy�lne krzywe i gradienty
+        if (!flame) flame = FindFirstObjectByType<FlameEnergy>();
+
+        // Domyślne krzywe
         lightIntensityCurve = new AnimationCurve(
             new Keyframe(0f, 0.1f),
             new Keyframe(0.15f, 0.6f),
@@ -68,24 +78,24 @@ public class DayNightCycle : MonoBehaviour
             new Keyframe(1f, 0.1f)
         );
 
-        lightColorGradient = new Gradient()
+        lightColorGradient = new Gradient
         {
-            colorKeys = new GradientColorKey[]
+            colorKeys = new[]
             {
-                new GradientColorKey(new Color(1f, 0.6f, 0.4f), 0f),  // �wit
-                new GradientColorKey(Color.white, 0.25f),             // dzie�
-                new GradientColorKey(new Color(1f, 0.5f, 0.2f), 0.5f),// zmierzch
-                new GradientColorKey(new Color(0.2f, 0.3f, 0.5f), 1f) // noc
+                new GradientColorKey(new Color(1f,0.6f,0.4f), 0f),   // świt
+                new GradientColorKey(Color.white,               0.25f),// dzień
+                new GradientColorKey(new Color(1f,0.5f,0.2f),  0.5f), // zmierzch
+                new GradientColorKey(new Color(0.2f,0.3f,0.5f),1f)    // noc
             }
         };
 
-        fogColorGradient = new Gradient()
+        fogColorGradient = new Gradient
         {
-            colorKeys = new GradientColorKey[]
+            colorKeys = new[]
             {
-                new GradientColorKey(new Color(0.5f,0.5f,0.6f),0f),
-                new GradientColorKey(new Color(0.7f,0.8f,1f),0.3f),
-                new GradientColorKey(new Color(0.3f,0.3f,0.4f),1f)
+                new GradientColorKey(new Color(0.5f,0.5f,0.6f), 0f),
+                new GradientColorKey(new Color(0.7f,0.8f,1f),   0.3f),
+                new GradientColorKey(new Color(0.3f,0.3f,0.4f), 1f)
             }
         };
 
@@ -101,29 +111,28 @@ public class DayNightCycle : MonoBehaviour
 
         _dayYaw = 0f;
         _nightYaw = nightOffsetDeg;
+        _isNightCached = false;
     }
 
-    //====================================================
+    // ================================================================
     void Update()
     {
-        if (dayDuration <= 0) return;
+        if (dayDuration <= 0f) return;
 
-        // Aktualizacja czasu cyklu
+        // Czas doby 0..1
         _cycleTimer += Application.isPlaying ? Time.deltaTime : 0f;
         time01 = Mathf.Repeat(_cycleTimer / dayDuration, 1f);
 
-        // --- Obr�t s�o�ca ---
+        // Obrót i parametry światła
         if (directionalLight)
         {
-            float rotation = time01 * 360f - 90f; // -90 = �wit
-            directionalLight.transform.rotation = Quaternion.Euler(rotation, 170f, 0f);
-
-            // Ustaw intensywno�� i kolor
+            float rotX = time01 * 360f - 90f; // -90 = świt
+            directionalLight.transform.rotation = Quaternion.Euler(rotX, 170f, 0f);
             directionalLight.intensity = lightIntensityCurve.Evaluate(time01);
             directionalLight.color = lightColorGradient.Evaluate(time01);
         }
 
-        // --- Mg�a ---
+        // Mgła
         if (useFog)
         {
             RenderSettings.fog = true;
@@ -131,19 +140,18 @@ public class DayNightCycle : MonoBehaviour
             RenderSettings.fogDensity = fogDensityCurve.Evaluate(time01);
         }
 
-        // --- Skybox Exposure & Blend ---
-        if (blendedSkybox != null)
+        // Skybox: Exposure + Blend + Rotacja
+        float blend01 = 0f;
+        if (blendedSkybox)
         {
             float exposure = Mathf.Clamp(exposureCurve.Evaluate(time01), 0.05f, 3f);
-            float blend = Mathf.Clamp01(blendCurve.Evaluate(time01));
+            blend01 = Mathf.Clamp01(blendCurve.Evaluate(time01));
 
             if (blendedSkybox.HasProperty("_Exposure"))
                 blendedSkybox.SetFloat("_Exposure", exposure);
-
             if (blendedSkybox.HasProperty("_Blend"))
-                blendedSkybox.SetFloat("_Blend", blend);
+                blendedSkybox.SetFloat("_Blend", blend01);
 
-            // --- Rotacja cubemap ---
             if (rotateSkybox && Application.isPlaying)
             {
                 _dayYaw = (_dayYaw + dayCubeYawSpeed * Time.deltaTime) % 360f;
@@ -158,16 +166,50 @@ public class DayNightCycle : MonoBehaviour
             if (blendedSkybox.HasProperty("_RotNightDeg"))
                 blendedSkybox.SetFloat("_RotNightDeg", _nightYaw);
 
-            // Aktualizacja o�wietlenia globalnego
             if (updateGI && Application.isPlaying)
                 DynamicGI.UpdateEnvironment();
         }
+
+        // Wylicz NOC/DZIEŃ i ustaw FlameEnergy.isNight (z histerezą)
+        if (flame != null)
+        {
+            bool targetNight;
+
+            // Jeśli mamy blendCurve (0 dzień → 1 noc), używaj jej
+            if (blendedSkybox && blendCurve != null && blendCurve.length > 0)
+            {
+                // próg z histerezą: przełącz dopiero, gdy przekroczy 0.5±h
+                float thresholdUp = 0.5f + nightHysteresis;   // dzień->noc
+                float thresholdDn = 0.5f - nightHysteresis;   // noc->dzień
+
+                if (!_isNightCached)
+                    targetNight = (blend01 >= thresholdUp);
+                else
+                    targetNight = (blend01 >= thresholdDn);
+            }
+            else
+            {
+                // Fallback: po intensywności światła z histerezą
+                float intensity = directionalLight ? directionalLight.intensity : 0f;
+                float up = nightIntensityThreshold + nightHysteresis;
+                float dn = nightIntensityThreshold - nightHysteresis;
+
+                if (!_isNightCached)
+                    targetNight = (intensity < dn);
+                else
+                    targetNight = (intensity < up);
+            }
+
+            _isNightCached = targetNight;
+            flame.isNight = _isNightCached;
+        }
     }
 
-    //====================================================
+    // ================================================================
     [ContextMenu("Apply Skybox Curves Preset")]
     public void ApplySkyboxCurvesPreset()
     {
+        // Exposure: ciemny świt → jasny dzień → ciemny zmierzch → bardzo ciemna noc
         exposureCurve = new AnimationCurve(
             new Keyframe(0.00f, 0.15f),
             new Keyframe(0.15f, 0.60f),
@@ -179,13 +221,14 @@ public class DayNightCycle : MonoBehaviour
         for (int i = 0; i < exposureCurve.keys.Length; i++)
             exposureCurve.SmoothTangents(i, 0.25f);
 
+        // Blend: 0 dzień → 1 noc (noc: północ i okolice 0/1; dzień: ok. 0.25–0.5)
         blendCurve = new AnimationCurve(
             new Keyframe(0.00f, 1.00f), // noc
-            new Keyframe(0.15f, 0.25f), // �wit
-            new Keyframe(0.25f, 0.00f), // dzie�
+            new Keyframe(0.15f, 0.25f), // świt
+            new Keyframe(0.25f, 0.00f), // dzień
             new Keyframe(0.55f, 0.25f), // zmierzch
             new Keyframe(0.75f, 1.00f), // noc
-            new Keyframe(1.00f, 1.00f)
+            new Keyframe(1.00f, 1.00f)  // noc
         );
         for (int i = 0; i < blendCurve.keys.Length; i++)
             blendCurve.SmoothTangents(i, 0.25f);
